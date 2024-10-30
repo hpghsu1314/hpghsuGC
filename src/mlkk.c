@@ -242,6 +242,7 @@ void InitializeGame(void) {
     // Node 11: adjacents [10, 12]; captures [6]
     board[11].adjacents[board[11].numAdjacents++] = 10;
     board[11].adjacents[board[11].numAdjacents++] = 12;
+    board[11].captures[board[11].numCaptures++] = 8;
     board[11].captures[board[11].numCaptures++] = 6;
 
     // Node 12: adjacents [9, 11]; captures [6, 10]
@@ -345,6 +346,8 @@ int GetMiddlePosition(int from, int to) {
 /**
  * @brief Return the head of a list of the legal moves from the input position.
  */
+void GenerateCaptureMoves(int from, Piece *boardState, Piece turn, MOVELIST **moves, int depth);
+
 MOVELIST *GenerateMoves(POSITION position) {
     MOVELIST *moves = NULL;
     Piece boardState[BOARDSIZE];
@@ -374,29 +377,65 @@ MOVELIST *GenerateMoves(POSITION position) {
                 }
             }
 
-            // Check for possible captures (predefined)
-            for (j = 0; j < board[i].numCaptures; j++) {
-                int dest = board[i].captures[j];
-                int over = GetMiddlePosition(i, dest);
-                if (over != -1 && boardState[over] != EMPTY && boardState[over] != turn && boardState[dest] == EMPTY) {
-                    // Encode capture move: from * 10000 + over * 100 + dest
-                    MOVE move = i * 10000 + over * 100 + dest;
-                    moves = CreateMovelistNode(move, moves);
-                }
-            }
+            // Check for possible captures (including multi-capture sequences)
+            GenerateCaptureMoves(i, boardState, turn, &moves, 0);
         }
     }
 
     return moves;
 }
 
-// ... [Rest of the code remains unchanged]
+/**
+ * @brief Recursively generate all possible capture sequences from a given position.
+ */
+void GenerateCaptureMoves(int from, Piece *boardState, Piece turn, MOVELIST **moves, int depth) {
+    int j;
+    BOOLEAN foundCapture = FALSE;
 
+    for (j = 0; j < board[from].numCaptures; j++) {
+        int dest = board[from].captures[j];
+        int over = GetMiddlePosition(from, dest);
+
+        // Check if this is a valid capture move
+        if (over != -1 && boardState[over] != EMPTY && boardState[over] != turn && boardState[dest] == EMPTY) {
+            foundCapture = TRUE;
+
+            // Create a temporary board state to simulate the move
+            Piece tempBoardState[BOARDSIZE];
+            memcpy(tempBoardState, boardState, sizeof(Piece) * BOARDSIZE);
+            tempBoardState[from] = EMPTY;      // Moving from this position
+            tempBoardState[over] = EMPTY;      // Captured opponent piece
+            tempBoardState[dest] = turn;       // Moving to this position
+
+            // Encode the current capture move: from * 10000 + over * 100 + dest
+            MOVE move = from * 10000 + over * 100 + dest;
+
+            // If this is the first capture, create a new move
+            if (depth == 0) {
+                *moves = CreateMovelistNode(move, *moves);
+            } else {
+                // If we are extending an existing capture sequence, add a new move node
+                MOVELIST *newMoveNode = CreateMovelistNode(move, *moves);
+                newMoveNode->next = *moves; // Insert at the beginning
+                *moves = newMoveNode;
+            }
+            
+            // Continue looking for additional captures from the new position
+            GenerateCaptureMoves(dest, tempBoardState, turn, moves, depth + 1);
+        }
+    }
+
+    // If no further captures are found and we are in a multi-capture sequence, add the move
+    if (!foundCapture && depth > 0) {
+        // This ensures that intermediate capture sequences are also added
+        return;
+    }
+}
 
 
 /**
  * @brief Return the child position reached when the input move
- * is made from the input position.
+ * is made from the input position, including multi-captures.
  */
 POSITION DoMove(POSITION position, MOVE move) {
     Piece boardState[BOARDSIZE];
@@ -413,28 +452,30 @@ POSITION DoMove(POSITION position, MOVE move) {
         tempPosition /= 3;
     }
 
-    // Apply the move
-    if (move < 10000) {
-        // Simple move: from * 100 + to
-        int from = move / 100;
-        int to = move % 100;
+    // Apply the move (handle multi-capture)
+    int currentMove = move;
+    while (currentMove >= 10000) {
+        int from = currentMove / 10000;
+        int over = (currentMove % 10000) / 100;
+        int to = currentMove % 100;
 
         boardState[to] = turn;
         boardState[from] = EMPTY;
-    } else {
-        // Capture move: from * 10000 + over * 100 + to
-        int from = move / 10000;
-        int over = (move % 10000) / 100;
-        int to = move % 100;
+        boardState[over] = EMPTY;
 
-        boardState[to] = turn;
-        boardState[from] = EMPTY;
-        boardState[over] = EMPTY; // Remove captured piece
-
-        // Since multiple jumps are not compulsory, we stop here
+        currentMove = currentMove % 10000; // Remove the last applied move
     }
 
-    // Switch turn
+    // If there is a simple move left after multi-capture moves
+    if (currentMove > 0) {
+        int from = currentMove / 100;
+        int to = currentMove % 100;
+
+        boardState[to] = turn;
+        boardState[from] = EMPTY;
+    }
+
+    // Switch turn after all captures or simple moves are applied
     turn = (turn == BLACK) ? WHITE : BLACK;
 
     // Encode the new position
@@ -579,7 +620,6 @@ void PrintPosition(POSITION position, STRING playerName, BOOLEAN usersTurn) {
  * Otherwise, get the new `move` and fill the pointer up.
  */
 USERINPUT GetAndPrintPlayersMove(POSITION position, MOVE *move, STRING playerName) {
-    USERINPUT ret;
     char input[100];
 
     // Generate and print possible moves
@@ -635,27 +675,35 @@ USERINPUT GetAndPrintPlayersMove(POSITION position, MOVE *move, STRING playerNam
  */
 BOOLEAN ValidTextInput(STRING input) {
     int from, to;
-    return sscanf(input, "%d %d", &from, &to) == 2;
+    return sscanf(input, "%d %d", &from, &to) == 2 || sscanf(input, "%d %d %d", &from, &to, &to) == 3;
 }
 
 /**
- * @brief Convert the string input to the internal move representation.
+ * @brief Convert the string input to the internal move representation,
+ *        including multi-capture.
  */
 MOVE ConvertTextInputToMove(STRING input) {
-    int from, to;
-    sscanf(input, "%d %d", &from, &to);
-    // Determine if it's a simple move or a capture
-    int over = GetMiddlePosition(from, to);
-    if (over != -1) {
-        return from * 10000 + over * 100 + to; // Capture move
+    int from, to, next;
+    if (sscanf(input, "%d %d %d", &from, &to, &next) == 3) {
+        // Multi-capture notation
+        MOVE move = from * 10000 + GetMiddlePosition(from, to) * 100 + to;
+        move = move * 10000 + GetMiddlePosition(to, next) * 100 + next;
+        return move;
     } else {
-        return from * 100 + to; // Simple move
+        sscanf(input, "%d %d", &from, &to);
+        // Determine if it's a simple move or a capture
+        int over = GetMiddlePosition(from, to);
+        if (over != -1) {
+            return from * 10000 + over * 100 + to; // Capture move
+        } else {
+            return from * 100 + to; // Simple move
+        }
     }
 }
 
 /**
  * @brief Write a short human-readable string representation
- * of the move to the input buffer.
+ *        of the move to the input buffer, now with multi-capture support.
  */
 void MoveToString(MOVE move, char *moveStringBuffer) {
     if (move < 10000) {
@@ -663,9 +711,15 @@ void MoveToString(MOVE move, char *moveStringBuffer) {
         int to = move % 100;
         sprintf(moveStringBuffer, "%d %d", from, to);
     } else {
-        int from = move / 10000;
-        int to = move % 100;
-        sprintf(moveStringBuffer, "%d %d (capture)", from, to);
+        char buffer[128] = "";
+        while (move >= 10000) {
+            int from = move / 10000;
+            int to = move % 100;
+            sprintf(buffer + strlen(buffer), "%d %d ", from, to);
+            move = move / 10000;
+        }
+        buffer[strlen(buffer) - 1] = '\0'; // Remove trailing space
+        strcpy(moveStringBuffer, buffer);
     }
 }
 
